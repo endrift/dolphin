@@ -258,7 +258,7 @@ set(LIBS
 
 if(LIBUSB_FOUND)
 	# Using shared LibUSB
-	set(LIBS	${LIBS}	${LIBUSB_LIBRARIES})
+	set(LIBS	${LIBS}	${LIBUSB_LIBRARIES} ${HIDAPI_LIBRARY})
 	set(SRCS	${SRCS}	IPC_HLE/WII_IPC_HLE_Device_hid.cpp
 	        	       	HW/SI_GCAdapter.cpp)
 endif(LIBUSB_FOUND)

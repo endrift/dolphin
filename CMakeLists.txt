@@ -483,6 +483,10 @@ if(NOT ANDROID)
 
 	endif()
 
+	find_library(HIDAPI_LIBRARY hidapi)
+	find_path(HIDAPI_INCLUDE_PATH NAMES hidapi.h)
+	include_directories(${HIDAPI_INCLUDE_PATH})
+
 	set(CMAKE_REQUIRED_LIBRARIES portaudio)
 	CHECK_CXX_SOURCE_RUNS(
 		"#include <portaudio.h>
