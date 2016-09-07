@@ -6,6 +6,7 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <netinet/in.h>
 
 #include "Common/CommonTypes.h"
 #include "Common/Flag.h"
@@ -20,9 +21,14 @@
 
 static std::thread connectionThread;
 static std::queue<std::unique_ptr<sf::TcpSocket>> waiting_socks;
-static std::queue<std::unique_ptr<sf::TcpSocket>> waiting_clocks;
 static std::mutex cs_gba;
-static std::mutex cs_gba_clk;
+
+#include "mgba/src/core/core.h"
+#include "gba/core.h"
+#include "gba/gba.h"
+#include "gba/io.h"
+#include "util/vfs.h"
+
 static u8 num_connected;
 
 namespace
@@ -30,15 +36,26 @@ namespace
 Common::Flag server_running;
 }
 
-enum EJoybusCmds
-{
-  CMD_RESET = 0xff,
-  CMD_STATUS = 0x00,
-  CMD_READ = 0x14,
-  CMD_WRITE = 0x15
-};
+const u64 BITS_PER_SECOND = 200000; // The signal is self-clocking, so there's a lot of variance
 
-const u64 BITS_PER_SECOND = 178571; // Experimentally observed
+static uint16_t _joyWriteRegister(struct GBASIODriver* driver, uint32_t address, uint16_t value)
+{
+  switch (address)
+  {
+    case REG_JOYCNT:
+      return (value & 0x0040) | (driver->p->p->memory.io[REG_JOYCNT >> 1] & ~(value & 0x7) & ~0x0040);
+    case REG_JOYSTAT:
+      return (value & 0x0030) | (driver->p->p->memory.io[REG_JOYSTAT >> 1] & ~0x30);
+    break;
+  }
+  return value;
+}
+
+static void _joyProcessEvents(struct mTiming* timing, void* user, uint32_t cycles_late)
+{
+  mGBAJoybusShim* shim = static_cast<mGBAJoybusShim*>(user);
+  shim->core->ProcessCommand(cycles_late);
+}
 
 u8 GetNumConnected()
 {
@@ -51,34 +68,47 @@ u8 GetNumConnected()
 
 // --- GameBoy Advance "Link Cable" ---
 
-int GetTransferTime(u8 cmd)
+static int GetSendBits(u8 cmd)
 {
   u64 bits_transferred = 8 + 1;
 
   switch (cmd)
   {
-  case CMD_RESET:
-  case CMD_STATUS:
-  {
-    bits_transferred += 24 + 1;
-    break;
-  }
-  case CMD_READ:
-  {
+  case JOY_CMD_RECV:
     bits_transferred += 40 + 1;
     break;
-  }
-  case CMD_WRITE:
-  {
-    bits_transferred += 40 + 1;
-    break;
-  }
+  case JOY_CMD_RESET:
+  case JOY_CMD_POLL:
+  case JOY_CMD_TRANS:
   default:
-  {
     break;
   }
+  return bits_transferred;
+}
+
+static int GetRecvBits(u8 cmd)
+{
+  u64 bits_received = 1;
+
+  switch (cmd)
+  {
+  case JOY_CMD_RESET:
+  case JOY_CMD_POLL:
+    bits_received += 24 + 1;
+    break;
+  case JOY_CMD_TRANS:
+    bits_received += 40 + 1;
+    break;
+  case JOY_CMD_RECV:
+  default:
+    break;
   }
-  return (int)(bits_transferred * SystemTimers::GetTicksPerSecond() / (GetNumConnected() * BITS_PER_SECOND));
+  return bits_received;
+}
+
+static int GetBitTransferTime(int bits_transferred)
+{
+  return (int)(bits_transferred * SystemTimers::GetTicksPerSecond() / BITS_PER_SECOND);
 }
 
 static void GBAConnectionWaiter()
@@ -88,18 +118,12 @@ static void GBAConnectionWaiter()
   Common::SetCurrentThreadName("GBA Connection Waiter");
 
   sf::TcpListener server;
-  sf::TcpListener clock_server;
 
   // "dolphin gba"
-  if (server.listen(0xd6ba) != sf::Socket::Done)
-    return;
-
-  // "clock"
-  if (clock_server.listen(0xc10c) != sf::Socket::Done)
+  if (server.listen(13721) != sf::Socket::Done)
     return;
 
   server.setBlocking(false);
-  clock_server.setBlocking(false);
 
   auto new_client = std::make_unique<sf::TcpSocket>();
   while (server_running.IsSet())
@@ -108,13 +132,6 @@ static void GBAConnectionWaiter()
     {
       std::lock_guard<std::mutex> lk(cs_gba);
       waiting_socks.push(std::move(new_client));
-
-      new_client = std::make_unique<sf::TcpSocket>();
-    }
-    if (clock_server.accept(*new_client) == sf::Socket::Done)
-    {
-      std::lock_guard<std::mutex> lk(cs_gba_clk);
-      waiting_clocks.push(std::move(new_client));
 
       new_client = std::make_unique<sf::TcpSocket>();
     }
@@ -146,40 +163,69 @@ static bool GetAvailableSock(std::unique_ptr<sf::TcpSocket>& sock_to_fill)
   return sock_filled;
 }
 
-static bool GetNextClock(std::unique_ptr<sf::TcpSocket>& sock_to_fill)
-{
-  bool sock_filled = false;
+static CoreTiming::EventType* et_GBAPoll = nullptr;
+static mGBACore* active_gbas[4] = { nullptr, nullptr, nullptr, nullptr };
 
-  std::lock_guard<std::mutex> lk(cs_gba_clk);
+static void GBAPoll(u64 userdata, s64 cyclesLate) {
+  CoreTiming::RemoveEvent(et_GBAPoll);
+  CoreTiming::ScheduleEvent(SystemTimers::GetTicksPerSecond() / 2048, et_GBAPoll);
 
-  if (!waiting_clocks.empty())
-  {
-    sock_to_fill = std::move(waiting_clocks.front());
-    waiting_clocks.pop();
-    sock_filled = true;
-  }
-
-  return sock_filled;
+  if (active_gbas[0])
+    active_gbas[0]->ClockSync();
+  if (active_gbas[1])
+    active_gbas[1]->ClockSync();
+  if (active_gbas[2])
+    active_gbas[2]->ClockSync();
+  if (active_gbas[3])
+    active_gbas[3]->ClockSync();
 }
 
-GBASockServer::GBASockServer(int _iDeviceNumber)
+mGBACore::mGBACore(int _iDeviceNumber)
+  : shim{ {
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    _joyWriteRegister
+  }, this }
 {
+  joy_event.context = &shim;
+  joy_event.name = "GBA Dolphin JOY Bus";
+  joy_event.callback = _joyProcessEvents;
+  joy_event.priority = 0x80;
+
   if (!connectionThread.joinable())
     connectionThread = std::thread(GBAConnectionWaiter);
 
-  cmd = 0;
+  if (!et_GBAPoll)
+    et_GBAPoll = CoreTiming::RegisterEvent("GBAPoll", GBAPoll);
+
   num_connected = 0;
   last_time_slice = 0;
-  booted = false;
   device_number = _iDeviceNumber;
+
+  clocks_pending = 0;
+
+  core = GBACoreCreate();
+  core->init(core);
+
+  video_buffer = std::make_unique<color_t[]>(240 * 160);
+  core->setVideoBuffer(core, video_buffer.get(), 240);
+
+  GBA* gba = static_cast<GBA*>(core->board);
+  GBASIOSetDriver(&gba->sio, &shim.d, SIO_JOYBUS);
+
+  struct VFile* bios = VFileOpen("gba_bios.bin", O_RDONLY);
+  if (bios) {
+    core->loadBIOS(core, bios, 0);
+  }
 }
 
-GBASockServer::~GBASockServer()
+mGBACore::~mGBACore()
 {
+  active_gbas[device_number] = nullptr;
   Disconnect();
 }
 
-void GBASockServer::Disconnect()
+void mGBACore::Disconnect()
 {
   if (client)
   {
@@ -187,117 +233,107 @@ void GBASockServer::Disconnect()
     client->disconnect();
     client = nullptr;
   }
-  if (clock_sync)
-  {
-    clock_sync->disconnect();
-    clock_sync = nullptr;
-  }
   last_time_slice = 0;
-  booted = false;
 }
 
-void GBASockServer::ClockSync()
+void mGBACore::ClockSync()
 {
-  if (!clock_sync && !GetNextClock(clock_sync))
-    return;
+  if (!client)
+  {
+    if (!GetAvailableSock(client))
+      return;
 
-  u32 time_slice = 0;
+    core->reset(core);
+
+    u32 width = htonl(240);
+    u32 height = htonl(160);
+    u32 depth = htonl(4);
+    client->send(&width, sizeof(width));
+    client->send(&height, sizeof(height));
+    client->send(&depth, sizeof(depth));
+
+    active_gbas[device_number] = this;
+    CoreTiming::RemoveEvent(et_GBAPoll);
+    CoreTiming::ScheduleEvent(SystemTimers::GetTicksPerSecond() / 2048, et_GBAPoll);
+  }
+  u64 time_slice = 0;
 
   if (last_time_slice == 0)
   {
     num_connected++;
-    last_time_slice = CoreTiming::GetTicks();
-    time_slice = (u32)(SystemTimers::GetTicksPerSecond() / 60);
+    time_slice = SystemTimers::GetTicksPerSecond() / 60;
   }
   else
   {
-    time_slice = (u32)(CoreTiming::GetTicks() - last_time_slice);
+    time_slice = CoreTiming::GetTicks() - last_time_slice;
   }
 
-  time_slice = (u32)((u64)time_slice * 16777216 / SystemTimers::GetTicksPerSecond());
+  time_slice = (u64)time_slice * 16777216 / SystemTimers::GetTicksPerSecond();
   last_time_slice = CoreTiming::GetTicks();
-  char bytes[4] = { 0, 0, 0, 0 };
-  bytes[0] = (time_slice >> 24) & 0xff;
-  bytes[1] = (time_slice >> 16) & 0xff;
-  bytes[2] = (time_slice >> 8) & 0xff;
-  bytes[3] = time_slice & 0xff;
 
-  sf::Socket::Status status = clock_sync->send(bytes, 4);
-  if (status == sf::Socket::Disconnected)
+  clocks_pending += time_slice;
+
+  if (clocks_pending <= 0)
+    WARN_LOG(SERIALINTERFACE, "Negative clocks pending: %d", clocks_pending);
+
+  GBA* gba = static_cast<GBA*>(shim.core->core->board);
+  mTimingDeschedule(&gba->timing, &joy_event);
+  mTimingSchedule(&gba->timing, &joy_event, clocks_pending);
+  int current_frame = core->frameCounter(core);
+  do {
+    core->runLoop(core);
+  } while (clocks_pending > 0);
+  if (core->frameCounter(core) != current_frame)
   {
-    clock_sync->disconnect();
-    clock_sync = nullptr;
+    client->setBlocking(true);
+    client->send(video_buffer.get(), 240 * 160 * 4);
+    u16 input;
+    size_t num_client_received;
+    client->setBlocking(false);
+    client->receive(&input, sizeof(input), num_client_received);
+    if (!num_client_received) {
+      input = 0;
+    }
+    core->setKeys(core, ntohs(input));
   }
 }
 
-void GBASockServer::Send(const u8* si_buffer)
+void mGBACore::Send(const u8* si_buffer)
 {
-  if (!client && !GetAvailableSock(client))
-    return;
-
   for (int i = 0; i < 5; i++)
     send_data[i] = si_buffer[i ^ 3];
-
-  cmd = (u8)send_data[0];
 
 #ifdef _DEBUG
   NOTICE_LOG(SERIALINTERFACE, "%01d cmd %02x [> %02x%02x%02x%02x]", device_number, (u8)send_data[0],
              (u8)send_data[1], (u8)send_data[2], (u8)send_data[3], (u8)send_data[4]);
 #endif
 
-  sf::Socket::Status status;
-  if (cmd == CMD_WRITE)
-    status = client->send(send_data, sizeof(send_data));
-  else
-    status = client->send(send_data, 1);
-
-  if (cmd != CMD_STATUS)
-    booted = true;
-
-  if (status == sf::Socket::Disconnected)
-    Disconnect();
-
-  time_cmd_sent = CoreTiming::GetTicks();
+  num_received = 0;
+  need_process = true;
 }
 
-int GBASockServer::Receive(u8* si_buffer)
+int mGBACore::Receive(u8* si_buffer)
 {
-  if (!client && !GetAvailableSock(client))
-    return -1;
-
-  size_t num_received = 0;
-  u64 transferTime = GetTransferTime((u8)send_data[0]);
-  bool block = (CoreTiming::GetTicks() - time_cmd_sent) >= transferTime;
-  if (cmd == CMD_STATUS && !booted)
-    block = false;
-
-  if (block)
+  if (!client || shim.d.p->mode != SIO_JOYBUS)
   {
-    sf::SocketSelector Selector;
-    Selector.add(*client);
-    Selector.wait(sf::milliseconds(200));
+    need_process = false;
+    return 0;
   }
 
-  sf::Socket::Status recv_stat = client->receive(recv_data, sizeof(recv_data), num_received);
-  if (recv_stat == sf::Socket::Disconnected)
+  s32 total_clocks_added = 0;
+  while (need_process)
   {
-    Disconnect();
-    return -1;
+    WARN_LOG(SERIALINTERFACE, "GBA %01d is out of sync", device_number);
+    total_clocks_added += 512;
+    clocks_pending += 512;
+    ClockSync();
   }
-
-  if (recv_stat == sf::Socket::NotReady)
-  {
-    num_received = 0;
-    WARN_LOG(SERIALINTERFACE, "Remote GBA is timing out");
-  }
-
-  if (num_received > sizeof(recv_data))
-    num_received = sizeof(recv_data);
+  clocks_pending -= total_clocks_added;
 
   if (num_received > 0)
   {
 #ifdef _DEBUG
-    WARN_LOG(SERIALINTERFACE, "%01d                              [< %02x%02x%02x%02x%02x] (%lu)",
+    WARN_LOG(SERIALINTERFACE, "%01d                              [< %02x%02x%02x%02x%02x] (%d)",
       device_number,
       (u8)recv_data[0], (u8)recv_data[1], (u8)recv_data[2],
       (u8)recv_data[3], (u8)recv_data[4],
@@ -308,51 +344,122 @@ int GBASockServer::Receive(u8* si_buffer)
       si_buffer[i ^ 3] = recv_data[i];
   }
 
-  return (int)num_received;
+  return num_received;
+}
+
+void mGBACore::ProcessCommand(uint32_t cycles_late)
+{
+  GBA* gba = static_cast<GBA*>(core->board);
+  clocks_pending = -cycles_late;
+  gba->earlyExit = true;
+  if (shim.d.p->mode != SIO_JOYBUS)
+    need_process = false;
+  if (!need_process)
+    return;
+
+  switch ((u8) send_data[0])
+  {
+  case JOY_CMD_RESET:
+    gba->memory.io[REG_JOYCNT >> 1] |= 1;
+    if (gba->memory.io[REG_JOYCNT >> 1] & 0x40)
+    {
+      GBARaiseIRQ(gba, IRQ_SIO);
+    }
+    // Fall through
+  case JOY_CMD_POLL:
+    recv_data[0] = 0x00;
+    recv_data[1] = 0x04;
+    recv_data[2] = gba->memory.io[REG_JOYSTAT >> 1];
+    num_received = 3;
+    break;
+  case JOY_CMD_RECV:
+    if (gba->memory.io[REG_JOYSTAT >> 1] & JOYSTAT_RECV_BIT) {
+      // XXX: Process this data later once that bit has been cleared
+      return;
+    }
+    gba->memory.io[REG_JOYCNT >> 1] |= 2;
+    gba->memory.io[REG_JOYSTAT >> 1] |= JOYSTAT_RECV_BIT;
+    gba->memory.io[REG_JOY_RECV_LO >> 1] = send_data[1] | (send_data[2] << 8);
+    gba->memory.io[REG_JOY_RECV_HI >> 1] = send_data[3] | (send_data[4] << 8);
+    recv_data[0] = gba->memory.io[REG_JOYSTAT >> 1];
+    num_received = 1;
+    if (gba->memory.io[REG_JOYCNT >> 1] & 0x40)
+    {
+      GBARaiseIRQ(gba, IRQ_SIO);
+    }
+    break;
+  case JOY_CMD_TRANS:
+    if (!(gba->memory.io[REG_JOYSTAT >> 1] & JOYSTAT_TRANS_BIT)) {
+      // The GBA timed out when replying
+      need_process = false;
+      return;
+    }
+    gba->memory.io[REG_JOYCNT >> 1] |= 4;
+    recv_data[0] = gba->memory.io[REG_JOY_TRANS_LO >> 1];
+    recv_data[1] = gba->memory.io[REG_JOY_TRANS_LO >> 1] >> 8;
+    recv_data[2] = gba->memory.io[REG_JOY_TRANS_HI >> 1];
+    recv_data[3] = gba->memory.io[REG_JOY_TRANS_HI >> 1] >> 8;
+    recv_data[4] = gba->memory.io[REG_JOYSTAT >> 1];
+    gba->memory.io[REG_JOYSTAT >> 1] &= ~JOYSTAT_TRANS_BIT;
+    num_received = 5;
+    if (gba->memory.io[REG_JOYCNT >> 1] & 0x40)
+    {
+      GBARaiseIRQ(gba, IRQ_SIO);
+    }
+    break;
+  }
+  need_process = false;
 }
 
 CSIDevice_GBA::CSIDevice_GBA(SIDevices _device, int _iDeviceNumber)
-    : ISIDevice(_device, _iDeviceNumber), GBASockServer(_iDeviceNumber)
+  : ISIDevice(_device, _iDeviceNumber)
+  , mGBACore(_iDeviceNumber)
 {
   waiting_for_response = false;
 }
 
 CSIDevice_GBA::~CSIDevice_GBA()
 {
-  GBASockServer::Disconnect();
+  mGBACore::Disconnect();
 }
 
 int CSIDevice_GBA::RunBuffer(u8* _pBuffer, int _iLength)
 {
+  // For debug logging only
+  ISIDevice::RunBuffer(_pBuffer, _iLength);
+
   if (!waiting_for_response)
   {
-    for (int i = 0; i < 5; i++)
-      send_data[i] = _pBuffer[i ^ 3];
-
     num_data_received = 0;
-    ClockSync();
+    cmd = _pBuffer[3];
+    num_bits_sent = GetSendBits(cmd);
+    num_bits_received = GetRecvBits(cmd);
     Send(_pBuffer);
     timestamp_sent = CoreTiming::GetTicks();
     waiting_for_response = true;
   }
 
-  if (waiting_for_response && num_data_received == 0)
+  ClockSync();
+
+  // Use an invalid command to get the time it takes to send the command packet
+  if (waiting_for_response && num_data_received == 0 && CoreTiming::GetTicks() - timestamp_sent >= (u64)GetBitTransferTime(num_bits_sent))
   {
     num_data_received = Receive(_pBuffer);
+
     NOTICE_LOG(SERIALINTERFACE, "Received %i bytes from GBA %i", num_data_received, GetDeviceNumber());
   }
 
-  if ((GetTransferTime(send_data[0])) < (int)(CoreTiming::GetTicks() - timestamp_sent))
+  if (waiting_for_response && CoreTiming::GetTicks() - timestamp_sent >= (u64)GetBitTransferTime(num_bits_sent + num_bits_received))
   {
-    if (num_data_received != 0)
-      waiting_for_response = false;
-    if (num_data_received > 0)
-      return num_data_received;
+    NOTICE_LOG(SERIALINTERFACE, "JOY transfer finished on GBA %i", GetDeviceNumber());
+
+    waiting_for_response = false;
+    return num_data_received;
   }
   return 0;
 }
 
 int CSIDevice_GBA::TransferInterval()
 {
-  return GetTransferTime(send_data[0]);
+  return GetBitTransferTime(num_bits_sent + num_bits_received);
 }

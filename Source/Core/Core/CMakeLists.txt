@@ -298,3 +298,9 @@ if(UNIX)
 endif(UNIX)
 
 add_dolphin_library(core "${SRCS}" "${LIBS}")
+
+if(MSVC)
+	set_source_files_properties(HW/SI_DeviceGBA.cpp PROPERTIES COMPILE_FLAGS /I${CMAKE_SOURCE_DIR}/Externals)
+else()
+	set_source_files_properties(HW/SI_DeviceGBA.cpp PROPERTIES COMPILE_FLAGS -I${CMAKE_SOURCE_DIR}/Externals)
+endif()
