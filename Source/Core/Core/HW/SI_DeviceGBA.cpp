@@ -328,16 +328,6 @@ int mGBACore::Receive(u8* si_buffer)
     return 0;
   }
 
-  s32 total_clocks_added = 0;
-  while (need_process)
-  {
-    WARN_LOG(SERIALINTERFACE, "GBA %01d is out of sync", device_number);
-    total_clocks_added += 512;
-    clocks_pending += 512;
-    ClockSync();
-  }
-  clocks_pending -= total_clocks_added;
-
   if (num_received > 0)
   {
 #ifdef _DEBUG
@@ -458,9 +448,13 @@ int CSIDevice_GBA::RunBuffer(u8* _pBuffer, int _iLength)
     NOTICE_LOG(SERIALINTERFACE, "JOY transfer finished on GBA %i", GetDeviceNumber());
 
     waiting_for_response = false;
-    return num_data_received;
-  }
-  return 0;
+    if (num_data_received > 0)
+      return num_data_received;
+  } else
+    return 0;
+
+  reinterpret_cast<u32*>(_pBuffer)[0] = SI_ERROR_NO_RESPONSE;
+  return 4;
 }
 
 int CSIDevice_GBA::TransferInterval()
