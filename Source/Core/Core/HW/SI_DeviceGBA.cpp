@@ -36,7 +36,9 @@ namespace
 Common::Flag server_running;
 }
 
-const u64 BITS_PER_SECOND = 200000; // The signal is self-clocking, so there's a lot of variance
+// The signal is self-clocking, so there's a lot of variance
+const u64 GC_BITS_PER_SECOND = 200000;
+const u64 GBA_BITS_PER_SECOND = 262144;
 
 static uint16_t _joyWriteRegister(struct GBASIODriver* driver, uint32_t address, uint16_t value)
 {
@@ -75,7 +77,7 @@ static int GetSendBits(u8 cmd)
   switch (cmd)
   {
   case JOY_CMD_RECV:
-    bits_transferred += 40 + 1;
+    bits_transferred += 32;
     break;
   case JOY_CMD_RESET:
   case JOY_CMD_POLL:
@@ -94,21 +96,27 @@ static int GetRecvBits(u8 cmd)
   {
   case JOY_CMD_RESET:
   case JOY_CMD_POLL:
-    bits_received += 24 + 1;
+    bits_received += 24;
     break;
   case JOY_CMD_TRANS:
-    bits_received += 40 + 1;
+    bits_received += 40;
     break;
   case JOY_CMD_RECV:
+    bits_received += 8;
   default:
     break;
   }
   return bits_received;
 }
 
-static int GetBitTransferTime(int bits_transferred)
+static int GetSendTransferTime(int bits_transferred)
 {
-  return (int)(bits_transferred * SystemTimers::GetTicksPerSecond() / BITS_PER_SECOND);
+  return (int)(bits_transferred * (u64)SystemTimers::GetTicksPerSecond() / GC_BITS_PER_SECOND);
+}
+
+static int GetRecvTransferTime(int bits_transferred)
+{
+  return (int)(bits_transferred * (u64)SystemTimers::GetTicksPerSecond() / GBA_BITS_PER_SECOND);
 }
 
 static void GBAConnectionWaiter()
@@ -362,9 +370,7 @@ void mGBACore::ProcessCommand(uint32_t cycles_late)
   case JOY_CMD_RESET:
     gba->memory.io[REG_JOYCNT >> 1] |= 1;
     if (gba->memory.io[REG_JOYCNT >> 1] & 0x40)
-    {
       GBARaiseIRQ(gba, IRQ_SIO);
-    }
     // Fall through
   case JOY_CMD_POLL:
     recv_data[0] = 0x00;
@@ -384,9 +390,7 @@ void mGBACore::ProcessCommand(uint32_t cycles_late)
     recv_data[0] = gba->memory.io[REG_JOYSTAT >> 1];
     num_received = 1;
     if (gba->memory.io[REG_JOYCNT >> 1] & 0x40)
-    {
       GBARaiseIRQ(gba, IRQ_SIO);
-    }
     break;
   case JOY_CMD_TRANS:
     if (!(gba->memory.io[REG_JOYSTAT >> 1] & JOYSTAT_TRANS_BIT)) {
@@ -403,9 +407,7 @@ void mGBACore::ProcessCommand(uint32_t cycles_late)
     gba->memory.io[REG_JOYSTAT >> 1] &= ~JOYSTAT_TRANS_BIT;
     num_received = 5;
     if (gba->memory.io[REG_JOYCNT >> 1] & 0x40)
-    {
       GBARaiseIRQ(gba, IRQ_SIO);
-    }
     break;
   }
   need_process = false;
@@ -435,6 +437,8 @@ int CSIDevice_GBA::RunBuffer(u8* _pBuffer, int _iLength)
     num_bits_sent = GetSendBits(cmd);
     num_bits_received = GetRecvBits(cmd);
     Send(_pBuffer);
+    CoreTiming::RemoveEvent(et_GBAPoll);
+    CoreTiming::ScheduleEvent(GetSendTransferTime(num_bits_sent), et_GBAPoll);
     timestamp_sent = CoreTiming::GetTicks();
     waiting_for_response = true;
   }
@@ -442,14 +446,14 @@ int CSIDevice_GBA::RunBuffer(u8* _pBuffer, int _iLength)
   ClockSync();
 
   // Use an invalid command to get the time it takes to send the command packet
-  if (waiting_for_response && num_data_received == 0 && CoreTiming::GetTicks() - timestamp_sent >= (u64)GetBitTransferTime(num_bits_sent))
+  if (waiting_for_response && num_data_received == 0 && CoreTiming::GetTicks() - timestamp_sent >= (u64)GetSendTransferTime(num_bits_sent) + (u64)GetRecvTransferTime(num_bits_received))
   {
     num_data_received = Receive(_pBuffer);
 
     NOTICE_LOG(SERIALINTERFACE, "Received %i bytes from GBA %i", num_data_received, GetDeviceNumber());
   }
 
-  if (waiting_for_response && CoreTiming::GetTicks() - timestamp_sent >= (u64)GetBitTransferTime(num_bits_sent + num_bits_received))
+  if (waiting_for_response && CoreTiming::GetTicks() - timestamp_sent >= (u64)GetSendTransferTime(num_bits_sent) + (u64)GetRecvTransferTime(num_bits_received))
   {
     NOTICE_LOG(SERIALINTERFACE, "JOY transfer finished on GBA %i", GetDeviceNumber());
 
@@ -461,5 +465,5 @@ int CSIDevice_GBA::RunBuffer(u8* _pBuffer, int _iLength)
 
 int CSIDevice_GBA::TransferInterval()
 {
-  return GetBitTransferTime(num_bits_sent + num_bits_received);
+  return GetSendTransferTime(num_bits_sent) + GetRecvTransferTime(num_bits_received);
 }
