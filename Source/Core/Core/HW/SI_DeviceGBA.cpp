@@ -293,11 +293,9 @@ void mGBACore::ClockSync()
   } while (clocks_pending > 0);
   if (core->frameCounter(core) != current_frame)
   {
-    client->setBlocking(true);
     client->send(video_buffer.get(), 240 * 160 * 4);
     u16 input;
     size_t num_client_received;
-    client->setBlocking(false);
     client->receive(&input, sizeof(input), num_client_received);
     if (!num_client_received) {
       input = 0;
