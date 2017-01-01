@@ -24,12 +24,18 @@ static std::queue<std::unique_ptr<sf::TcpSocket>> waiting_socks;
 static std::mutex cs_gba;
 
 #include <mgba/core/core.h>
+#include <mgba/core/log.h>
 #include <mgba/gba/core.h>
 #include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gba/io.h>
 #include <mgba-util/vfs.h>
 
+static void mGBALog(mLogger*, int category, mLogLevel level, const char* format, va_list args)
+{
+}
+
 static u8 num_connected;
+static mLogger _logger = { mGBALog };
 
 namespace
 {
@@ -195,6 +201,8 @@ mGBACore::mGBACore(int _iDeviceNumber)
     _joyWriteRegister
   }, this }
 {
+  mLogSetDefaultLogger(&_logger);
+
   joy_event.context = &shim;
   joy_event.name = "GBA Dolphin JOY Bus";
   joy_event.callback = _joyProcessEvents;
