@@ -23,11 +23,11 @@ static std::thread connectionThread;
 static std::queue<std::unique_ptr<sf::TcpSocket>> waiting_socks;
 static std::mutex cs_gba;
 
-#include "mgba/src/core/core.h"
-#include "gba/core.h"
-#include "gba/gba.h"
-#include "gba/io.h"
-#include "util/vfs.h"
+#include <mgba/core/core.h>
+#include <mgba/gba/core.h>
+#include <mgba/internal/gba/gba.h>
+#include <mgba/internal/gba/io.h>
+#include <mgba-util/vfs.h>
 
 static u8 num_connected;
 

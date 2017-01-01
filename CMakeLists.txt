@@ -881,7 +881,7 @@ set(USE_DEBUGGERS OFF)
 set(MINIMAL_CORE ON)
 set(QUIET ON)
 add_subdirectory(Externals/mgba)
-include_directories(Externals/mgba/src)
+include_directories(Externals/mgba/include)
 list(APPEND LIBS mgba)
 
 if(NOT DISABLE_WX)

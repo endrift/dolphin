@@ -10,8 +10,8 @@
 #include "Common/CommonTypes.h"
 #include "Core/HW/SI_Device.h"
 
-#include "core/timing.h"
-#include "gba/interface.h"
+#include <mgba/core/timing.h>
+#include <mgba/gba/interface.h>
 // GameBoy Advance "Link Cable"
 
 u8 GetNumConnected();
