@@ -113,6 +113,11 @@ add_library(core
   HW/GCPad.cpp
   HW/GCPadEmu.cpp
   HW/GPFifo.cpp
+  HW/HSP/HSP.cpp
+  HW/HSP/HSP_Device.cpp
+  HW/HSP/HSP_DeviceARAMExpansion.cpp
+  HW/HSP/HSP_DeviceGBPlayer.cpp
+  HW/HSP/HSP_DeviceNull.cpp
   HW/HW.cpp
   HW/Memmap.cpp
   HW/MemoryInterface.cpp

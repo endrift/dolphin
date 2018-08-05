@@ -13,6 +13,7 @@
 
 #include "Common/IniFile.h"
 #include "Core/HW/EXI/EXI_Device.h"
+#include "Core/HW/HSP/HSP_Device.h"
 #include "Core/HW/SI/SI_Device.h"
 
 namespace DiscIO
@@ -216,6 +217,8 @@ struct SConfig
   std::string m_strGbaCartB;
   ExpansionInterface::TEXIDevices m_EXIDevice[3];
   SerialInterface::SIDevices m_SIDevice[4];
+  HSP::HSPDevices m_HSPDevice;
+  int m_ARAMExpansion;
   std::string m_bba_mac;
 
   // interface language
