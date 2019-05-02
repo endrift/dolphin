@@ -155,6 +155,7 @@
     <ClCompile Include="HW\HSP\HSP.cpp" />
     <ClCompile Include="HW\HSP\HSP_Device.cpp" />
     <ClCompile Include="HW\HSP\HSP_DeviceARAMExpansion.cpp" />
+    <ClCompile Include="HW\HSP\HSP_DeviceGBPlayer.cpp" />
     <ClCompile Include="HW\HSP\HSP_DeviceNull.cpp" />
     <ClCompile Include="HW\HW.cpp" />
     <ClCompile Include="HW\Memmap.cpp" />

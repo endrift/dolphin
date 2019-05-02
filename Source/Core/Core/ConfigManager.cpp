@@ -221,6 +221,9 @@ void SConfig::SaveCoreSettings(IniFile& ini)
   core->Set("SerialPort1", m_EXIDevice[2]);
   core->Set("HSP", m_HSPDevice);
   core->Set("ARAMExpansion", m_ARAMExpansion);
+  core->Set("GBPGame", m_GBPGame);
+  core->Set("GBPBootrom", m_GBPBootrom);
+  core->Set("GBPBootromCgb", m_GBPBootromCgb);
   core->Set("BBA_MAC", m_bba_mac);
   for (int i = 0; i < SerialInterface::MAX_SI_CHANNELS; ++i)
   {
@@ -498,6 +501,9 @@ void SConfig::LoadCoreSettings(IniFile& ini)
   core->Get("SerialPort1", (int*)&m_EXIDevice[2], ExpansionInterface::EXIDEVICE_NONE);
   core->Get("HSP", (int*)&m_HSPDevice, HSP::HSPDEVICE_NONE);
   core->Get("ARAMExpansion", &m_ARAMExpansion);
+  core->Get("GBPGame", &m_GBPGame);
+  core->Get("GBPBootrom", &m_GBPBootrom);
+  core->Get("GBPBootromCgb", &m_GBPBootromCgb);
   core->Get("BBA_MAC", &m_bba_mac);
   for (int i = 0; i < SerialInterface::MAX_SI_CHANNELS; ++i)
   {

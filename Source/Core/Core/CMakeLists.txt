@@ -299,6 +299,7 @@ PUBLIC
   discio
   enet
   inputcommon
+  mgba
   ${MBEDTLS_LIBRARIES}
   pugixml
   sfml-network

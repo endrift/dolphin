@@ -219,6 +219,9 @@ struct SConfig
   SerialInterface::SIDevices m_SIDevice[4];
   HSP::HSPDevices m_HSPDevice;
   int m_ARAMExpansion;
+  std::string m_GBPGame;
+  std::string m_GBPBootrom;
+  std::string m_GBPBootromCgb;
   std::string m_bba_mac;
 
   // interface language

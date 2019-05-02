@@ -567,7 +567,7 @@ static void Do_ARAM_DMA()
         s_arDMA.Cnt.count -= 8;
       }
     }
-	else if (!s_ARAM.wii_mode)
+    else if (!s_ARAM.wii_mode)
     {
       while (s_arDMA.Cnt.count)
       {
